@@ -30,6 +30,7 @@ type options struct {
 	brief    bool
 	noDigest bool
 	replay   bool
+	noTPM    bool
 	asJSON   bool
 }
 
@@ -45,6 +46,7 @@ func main() {
 	flag.BoolVar(&o.brief, "brief", false, "one line per event (no detail lines)")
 	flag.BoolVar(&o.noDigest, "no-digest", false, "do not print digests")
 	flag.BoolVar(&o.replay, "replay", false, "also print PCR values recomputed from the log")
+	flag.BoolVar(&o.noTPM, "no-tpm", false, "do not read the current PCR values from the TPM")
 	flag.BoolVar(&o.asJSON, "json", false, "print as JSON")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "usage: tpmlog [flags]\n\nPrints the TPM event log of the last boot from %s\n\nflags:\n", tpmlog.DefaultDir)
@@ -175,6 +177,9 @@ func printText(log *tpmlog.Log, file tpmlog.LogFile, f filter, o options) {
 	if o.replay {
 		printReplay(log)
 	}
+	if !o.noTPM {
+		printTPMPCRs()
+	}
 	if log.ParseError != nil {
 		fmt.Printf("\nlog truncated or malformed: %v\n", log.ParseError)
 	}
@@ -295,6 +300,26 @@ func printReplay(log *tpmlog.Log) {
 	}
 }
 
+// printTPMPCRs 는 로컬 TPM 에서 읽은 현재 PCR 값을 출력한다.
+// 로그를 리플레이한 값과 같아야 부팅 측정이 로그와 일치한다는 뜻이다.
+func printTPMPCRs() {
+	banks, err := tpmlog.ReadTPMPCRs()
+	if err != nil {
+		fmt.Printf("\ncurrent TPM PCR values: %v\n", err)
+		return
+	}
+	for _, b := range banks {
+		fmt.Printf("\nCurrent PCR values read from the TPM (%s):\n", b.Alg)
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "  PCR\tVALUE\tUSAGE")
+		for _, v := range b.Values {
+			fmt.Fprintf(w, "  %02d\t%s\t%s\n",
+				v.PCRIndex, hex.EncodeToString(v.Value), tpmlog.PCRDescription(v.PCRIndex))
+		}
+		w.Flush()
+	}
+}
+
 // --- JSON 출력 ---
 
 type jsonOutput struct {
@@ -308,6 +333,8 @@ type jsonOutput struct {
 	Error   string       `json:"parseError,omitempty"`
 	Events  []jsonEvent  `json:"events"`
 	Replay  []jsonReplay `json:"replay,omitempty"`
+	TPMPCRs []jsonReplay `json:"tpmPcrs,omitempty"`
+	TPMErr  string       `json:"tpmError,omitempty"`
 }
 
 type jsonFile struct {
@@ -406,6 +433,20 @@ func printJSON(log *tpmlog.Log, file tpmlog.LogFile, f filter, o options) error 
 				r.Values[strconv.FormatUint(uint64(v.PCRIndex), 10)] = hex.EncodeToString(v.Value)
 			}
 			out.Replay = append(out.Replay, r)
+		}
+	}
+
+	if !o.noTPM {
+		banks, err := tpmlog.ReadTPMPCRs()
+		if err != nil {
+			out.TPMErr = err.Error()
+		}
+		for _, b := range banks {
+			r := jsonReplay{Alg: b.Alg.String(), Values: map[string]string{}}
+			for _, v := range b.Values {
+				r.Values[strconv.FormatUint(uint64(v.PCRIndex), 10)] = hex.EncodeToString(v.Value)
+			}
+			out.TPMPCRs = append(out.TPMPCRs, r)
 		}
 	}
 
